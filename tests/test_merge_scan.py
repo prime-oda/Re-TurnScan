@@ -5,8 +5,10 @@ merge_scan モジュールのコア関数をテストする。
 """
 
 import os
+import subprocess
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pypdf import PdfReader, PdfWriter
@@ -47,7 +49,112 @@ class TestGetPdfPageCount:
         assert merge_scan.get_pdf_page_count(missing) == -1
 
 
-# ── merge_front_back ──────────────────────────────────────────────────────────
+# ── detect_rotation_osd ───────────────────────────────────────────────────────
+
+class TestDetectRotationOsd:
+    def _make_tesseract_result(self, stdout: str, returncode: int = 0):
+        result = MagicMock()
+        result.stdout = stdout
+        result.returncode = returncode
+        return result
+
+    def test_returns_0_when_no_rotation(self):
+        output = "Orientation in degrees: 0\nRotate: 0\nOrientation confidence: 9.50\n"
+        with patch("subprocess.run", return_value=self._make_tesseract_result(output)):
+            assert merge_scan.detect_rotation_osd(Path("dummy.png")) == 0
+
+    def test_returns_90(self):
+        output = "Orientation in degrees: 270\nRotate: 90\nOrientation confidence: 8.00\n"
+        with patch("subprocess.run", return_value=self._make_tesseract_result(output)):
+            assert merge_scan.detect_rotation_osd(Path("dummy.png")) == 90
+
+    def test_returns_180(self):
+        output = "Orientation in degrees: 180\nRotate: 180\nOrientation confidence: 7.00\n"
+        with patch("subprocess.run", return_value=self._make_tesseract_result(output)):
+            assert merge_scan.detect_rotation_osd(Path("dummy.png")) == 180
+
+    def test_returns_270(self):
+        output = "Orientation in degrees: 90\nRotate: 270\nOrientation confidence: 9.00\n"
+        with patch("subprocess.run", return_value=self._make_tesseract_result(output)):
+            assert merge_scan.detect_rotation_osd(Path("dummy.png")) == 270
+
+    def test_returns_0_when_tesseract_not_found(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert merge_scan.detect_rotation_osd(Path("dummy.png")) == 0
+
+    def test_returns_0_when_timeout(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="tesseract", timeout=30)):
+            assert merge_scan.detect_rotation_osd(Path("dummy.png")) == 0
+
+    def test_returns_0_when_rotate_line_missing(self):
+        output = "Orientation in degrees: 90\nOrientation confidence: 9.50\n"
+        with patch("subprocess.run", return_value=self._make_tesseract_result(output)):
+            assert merge_scan.detect_rotation_osd(Path("dummy.png")) == 0
+
+    def test_returns_0_for_unexpected_angle(self):
+        output = "Rotate: 45\n"
+        with patch("subprocess.run", return_value=self._make_tesseract_result(output)):
+            assert merge_scan.detect_rotation_osd(Path("dummy.png")) == 0
+
+
+# ── correct_pdf_pages ─────────────────────────────────────────────────────────
+
+class TestCorrectPdfPages:
+    def test_returns_pages_when_pdf2image_unavailable(self, tmp_path):
+        """pdf2image がない場合は元ページをそのまま返す。"""
+        pdf = tmp_path / "test.pdf"
+        _make_pdf(pdf, 2)
+        with patch.dict("sys.modules", {"pdf2image": None}):
+            pages = merge_scan.correct_pdf_pages(pdf)
+        assert len(pages) == 2
+
+    def test_returns_pages_when_convert_fails(self, tmp_path):
+        """pdf2image の変換が例外を起こしても元ページを返す。"""
+        pdf = tmp_path / "test.pdf"
+        _make_pdf(pdf, 3)
+        mock_pdf2image = MagicMock()
+        mock_pdf2image.convert_from_path.side_effect = Exception("変換失敗")
+        with patch.dict("sys.modules", {"pdf2image": mock_pdf2image}):
+            pages = merge_scan.correct_pdf_pages(pdf)
+        assert len(pages) == 3
+
+    def test_rotates_pages_based_on_osd(self, tmp_path):
+        """OSD が 180 度を返したページが rotate() される。"""
+        pdf = tmp_path / "test.pdf"
+        _make_pdf(pdf, 1)
+
+        mock_image = MagicMock()
+        mock_pdf2image = MagicMock()
+        mock_pdf2image.convert_from_path.return_value = [mock_image]
+
+        osd_output = "Rotate: 180\n"
+        with patch.dict("sys.modules", {"pdf2image": mock_pdf2image}):
+            with patch("subprocess.run", return_value=MagicMock(stdout=osd_output)):
+                pages = merge_scan.correct_pdf_pages(pdf)
+
+        assert len(pages) == 1
+        # rotate() が適用されたページの /Rotate エントリを確認
+        assert pages[0].get("/Rotate", 0) == 180
+
+    def test_no_rotation_when_osd_returns_0(self, tmp_path):
+        """OSD が 0 を返した場合はページを変更しない。"""
+        pdf = tmp_path / "test.pdf"
+        _make_pdf(pdf, 1)
+
+        mock_image = MagicMock()
+        mock_pdf2image = MagicMock()
+        mock_pdf2image.convert_from_path.return_value = [mock_image]
+
+        osd_output = "Rotate: 0\n"
+        with patch.dict("sys.modules", {"pdf2image": mock_pdf2image}):
+            with patch("subprocess.run", return_value=MagicMock(stdout=osd_output)):
+                pages = merge_scan.correct_pdf_pages(pdf)
+
+        assert len(pages) == 1
+        assert pages[0].get("/Rotate", 0) == 0
+
+
+
 
 class TestMergeFrontBack:
     def test_merge_produces_correct_page_count(self, tmp_path):
