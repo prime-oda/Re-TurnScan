@@ -257,6 +257,22 @@ class TestFindAndMergePairs:
         assert len(output_files) == 0
         assert merged == set()
 
+    def test_no_pair_when_latest_file_is_old(self, tmp_path):
+        """最新ファイルが2分以上前の場合、新規スキャンなしとみなしてスキップする。"""
+        front = tmp_path / "front.pdf"
+        back = tmp_path / "back.pdf"
+        _make_pdf(front, 2)
+        _make_pdf(back, 2)
+
+        now = time.time()
+        os.utime(front, (now - 200, now - 200))  # 3分20秒前
+        os.utime(back, (now - 150, now - 150))   # 2分30秒前（最新だが2分超）
+
+        merged = merge_scan.find_and_merge_pairs(tmp_path, set())
+        output_files = list(tmp_path.glob(f"{merge_scan.MERGED_PREFIX}*.pdf"))
+        assert len(output_files) == 0
+        assert merged == set()
+
     def test_no_pair_when_page_counts_differ(self, tmp_path):
         front = tmp_path / "front.pdf"
         back = tmp_path / "back.pdf"

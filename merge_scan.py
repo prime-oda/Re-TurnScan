@@ -28,6 +28,7 @@ from pypdf import PdfReader, PdfWriter
 
 # ── 設定 ──────────────────────────────────────────────────────────────────────
 WATCH_INTERVAL_SECONDS = 60   # 監視間隔（秒）
+RECENT_FILE_WINDOW_SECONDS = 120  # 最新ファイルとみなす時間窓（監視間隔の2倍）
 PAIR_WINDOW_SECONDS = 300     # ペアとみなす時間窓（5分）
 MERGED_PREFIX = "merged_"     # マージ済みファイルの接頭辞
 
@@ -173,6 +174,7 @@ def find_and_merge_pairs(folder: Path, already_merged: set) -> set:
     フォルダ内のPDFを検索し、条件に合うペアをマージする。
 
     条件:
+      - 最新ファイルが現在時刻から2分以内に更新されている（新規スキャンの有無を判定）
       - 最新ファイルの更新時刻から過去5分以内に更新された別のPDFがある
       - 両ファイルのページ数が同じ
 
@@ -201,6 +203,11 @@ def find_and_merge_pairs(folder: Path, already_merged: set) -> set:
 
     latest = pdf_files[0]
     latest_mtime = datetime.fromtimestamp(latest.stat().st_mtime)
+
+    # 最新ファイルが一定時間以上前なら新規スキャンなしとみなしてスキップ
+    if datetime.now() - latest_mtime > timedelta(seconds=RECENT_FILE_WINDOW_SECONDS):
+        return already_merged
+
     threshold = latest_mtime - timedelta(seconds=PAIR_WINDOW_SECONDS)
 
     for candidate in pdf_files[1:]:
