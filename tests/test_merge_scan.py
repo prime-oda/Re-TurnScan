@@ -202,6 +202,22 @@ class TestFindAndMergePairs:
         ]
         assert len(output_files) == 0
 
+    def test_dot_files_excluded_from_candidates(self, tmp_path):
+        """「.」で始まるファイル（隠しファイル・AppleDoubleファイル等）はペア候補にならない。"""
+        normal = tmp_path / "scan.pdf"
+        dot_file = tmp_path / "._scan.pdf"
+        _make_pdf(normal, 2)
+        dot_file.write_bytes(b"\x00\x05\x16\x07\x00")  # 不正なPDFバイト列
+
+        now = time.time()
+        os.utime(normal, (now - 60, now - 60))
+        os.utime(dot_file, (now, now))
+
+        result = merge_scan.find_and_merge_pairs(tmp_path, set())
+        output_files = list(tmp_path.glob(f"{merge_scan.MERGED_PREFIX}*.pdf"))
+        assert len(output_files) == 0
+        assert result == set()
+
     def test_older_file_is_front(self, tmp_path):
         """更新時刻が古い方が表面として使われることを確認する。"""
         older = tmp_path / "older.pdf"

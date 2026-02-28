@@ -105,7 +105,11 @@ def find_and_merge_pairs(folder: Path, already_merged: set) -> set:
         更新された already_merged セット
     """
     pdf_files = sorted(
-        [f for f in folder.glob("*.pdf") if not f.name.startswith(MERGED_PREFIX)],
+        [
+            f for f in folder.glob("*.pdf")
+            if not f.name.startswith(".")
+            and not f.name.startswith(MERGED_PREFIX)
+        ],
         key=lambda f: f.stat().st_mtime,
         reverse=True,
     )
