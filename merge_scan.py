@@ -17,7 +17,9 @@ ADFで裏面をまとめてスキャンする際、用紙スタックを反転�
 
 import logging
 import os
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,6 +39,89 @@ logger = logging.getLogger(__name__)
 
 
 # ── コア関数 ──────────────────────────────────────────────────────────────────
+
+def detect_rotation_osd(image_path: Path) -> int:
+    """
+    Tesseract OSD (--psm 0) を使って画像の回転角度を検出する。
+
+    tesseract コマンドが存在しない場合、OSD に失敗した場合などは
+    警告ログを出して 0 を返す（回転補正なし）。
+
+    Args:
+        image_path: 検査対象の画像ファイルパス
+
+    Returns:
+        回転角度 (0, 90, 180, 270)。検出失敗時は 0。
+    """
+    try:
+        result = subprocess.run(
+            ["tesseract", str(image_path), "stdout", "--psm", "0", "-l", "osd"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("Rotate:"):
+                try:
+                    angle = int(line.split(":")[1].strip())
+                except ValueError:
+                    break
+                if angle in (0, 90, 180, 270):
+                    return angle
+                logger.warning("OSD から予期しない回転角度を受け取りました: %d", angle)
+                return 0
+    except FileNotFoundError:
+        logger.warning("tesseract が見つかりません。OSD をスキップします。")
+    except subprocess.TimeoutExpired:
+        logger.warning("OSD 検出がタイムアウトしました: %s", image_path)
+    except Exception as e:
+        logger.warning("OSD 検出に失敗しました: %s", e)
+    return 0
+
+
+def correct_pdf_pages(pdf_path: Path) -> list:
+    """
+    PDF の各ページを Tesseract OSD で解析し、回転補正したページのリストを返す。
+
+    pdf2image (poppler) および tesseract が利用できない場合は
+    補正なしで元のページを返す（フォールバック）。
+
+    Args:
+        pdf_path: 処理対象の PDF ファイルパス
+
+    Returns:
+        回転補正済みの pypdf ページオブジェクトのリスト
+    """
+    reader = PdfReader(str(pdf_path))
+    pages = list(reader.pages)
+
+    try:
+        from pdf2image import convert_from_path  # type: ignore[import]
+    except ImportError:
+        logger.warning(
+            "pdf2image が見つかりません。OSD をスキップします。"
+            " `pip install pdf2image` でインストールしてください。"
+        )
+        return pages
+
+    try:
+        images = convert_from_path(str(pdf_path), dpi=150)
+    except Exception as e:
+        logger.warning("PDF→画像変換に失敗しました: %s", e)
+        return pages
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        corrected = []
+        for i, (page, image) in enumerate(zip(pages, images)):
+            img_path = Path(tmpdir) / f"page_{i:04d}.png"
+            image.save(str(img_path), "PNG")
+            angle = detect_rotation_osd(img_path)
+            if angle != 0:
+                logger.info("ページ %d を %d 度回転補正します。", i + 1, angle)
+                page.rotate(angle)
+            corrected.append(page)
+    return corrected
+
 
 def get_pdf_page_count(pdf_path: Path) -> int:
     """PDFのページ数を返す。読み取れない場合は -1 を返す。"""
@@ -63,11 +148,8 @@ def merge_front_back(front_path: Path, back_path: Path, output_path: Path) -> No
     Raises:
         ValueError: 両PDFのページ数が異なる場合
     """
-    front_reader = PdfReader(str(front_path))
-    back_reader = PdfReader(str(back_path))
-
-    front_pages = list(front_reader.pages)
-    back_pages = list(back_reader.pages)
+    front_pages = correct_pdf_pages(front_path)
+    back_pages = correct_pdf_pages(back_path)
 
     if len(front_pages) != len(back_pages):
         raise ValueError(
